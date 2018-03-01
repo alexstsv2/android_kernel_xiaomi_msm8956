@@ -51,11 +51,15 @@
 #include <linux/qcom_iommu.h>
 #include <linux/msm_iommu_domains.h>
 
+#ifdef CONFIG_MACH_XIAOMI_KENZO
 #include "mdss_dsi.h"
+#endif
 #include "mdss_fb.h"
 #include "mdss_mdp_splash_logo.h"
 #define CREATE_TRACE_POINTS
 #include "mdss_debug.h"
+
+#include "mdss_livedisplay.h"
 
 #ifdef CONFIG_FB_MSM_TRIPLE_BUFFER
 #define MDSS_FB_NUM 3
@@ -71,6 +75,13 @@
 
 #define BLANK_FLAG_LP	FB_BLANK_NORMAL
 #define BLANK_FLAG_ULP	FB_BLANK_VSYNC_SUSPEND
+
+#define MDSS_BRIGHT_TO_BL_DIMMER(out, v) do {\
+					out = ((v) * (v) * 255  / 4095 + (v) * (255 - (v)) / 32);\
+					} while (0)
+
+bool backlight_dimmer = false;
+module_param(backlight_dimmer, bool, 0755);
 
 static struct fb_info *fbi_list[MAX_FBI_LIST];
 static int fbi_list_index;
@@ -131,10 +142,14 @@ static void mdss_fb_set_bl_brightness(struct led_classdev *led_cdev,
 	if (value > mfd->panel_info->brightness_max)
 		value = mfd->panel_info->brightness_max;
 
-	/* This maps android backlight level 0 to 255 into
-	   driver backlight level 0 to bl_max with rounding */
-	MDSS_BRIGHT_TO_BL(bl_lvl, value, mfd->panel_info->bl_max,
-				mfd->panel_info->brightness_max);
+	if (backlight_dimmer) {
+		MDSS_BRIGHT_TO_BL_DIMMER(bl_lvl, value);
+	} else {
+		/* This maps android backlight level 0 to 255 into
+		   driver backlight level 0 to bl_max with rounding */
+		MDSS_BRIGHT_TO_BL(bl_lvl, value, mfd->panel_info->bl_max,
+					mfd->panel_info->brightness_max);
+	}
 
 	if (!bl_lvl && value)
 		bl_lvl = 1;
@@ -640,7 +655,7 @@ static ssize_t mdss_fb_force_panel_dead(struct device *dev,
  * This Function dynamically switches to and from video mode. This
  * swtich involves the panel turning off backlight during trantision.
  */
-static int mdss_fb_blanking_mode_switch (struct msm_fb_data_type *mfd, int mode)
+static int mdss_fb_blanking_mode_switch(struct msm_fb_data_type *mfd, int mode)
 {
 	int ret = 0;
 	u32 bl_lvl = 0;
@@ -775,8 +790,11 @@ static ssize_t mdss_fb_get_dfps_mode(struct device *dev,
 
 	return ret;
 }
-extern  void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
+
+#ifdef CONFIG_MACH_XIAOMI_KENZO
+extern void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
 			struct dsi_panel_cmds *pcmds);
+#endif
 
 static DEVICE_ATTR(msm_fb_type, S_IRUGO, mdss_fb_get_type, NULL);
 static DEVICE_ATTR(msm_fb_split, S_IRUGO | S_IWUSR, mdss_fb_show_split,
@@ -819,7 +837,8 @@ static int mdss_fb_create_sysfs(struct msm_fb_data_type *mfd)
 	rc = sysfs_create_group(&mfd->fbi->dev->kobj, &mdss_fb_attr_group);
 	if (rc)
 		pr_err("sysfs group creation failed, rc=%d\n", rc);
-	return rc;
+
+	return mdss_livedisplay_create_sysfs(mfd);
 }
 
 static void mdss_fb_remove_sysfs(struct msm_fb_data_type *mfd)
@@ -1286,6 +1305,7 @@ static void mdss_fb_scale_bl(struct msm_fb_data_type *mfd, u32 *bl_lvl)
 	(*bl_lvl) = temp;
 }
 
+/* must call this function from within mfd->bl_lock */
 void mdss_fb_set_backlight(struct msm_fb_data_type *mfd, u32 bkl_lvl)
 {
 	struct mdss_panel_data *pdata;
@@ -1304,6 +1324,7 @@ void mdss_fb_set_backlight(struct msm_fb_data_type *mfd, u32 bkl_lvl)
 	}
 
 	pdata = dev_get_platdata(&mfd->pdev->dev);
+
 	if ((pdata) && (pdata->set_backlight)) {
 		if (mfd->mdp.ad_calc_bl)
 			(*mfd->mdp.ad_calc_bl)(mfd, temp, &temp,
@@ -1467,7 +1488,11 @@ static int mdss_fb_blank_blank(struct msm_fb_data_type *mfd,
 
 	return ret;
 }
+
+#ifdef CONFIG_MACH_XIAOMI_KENZO
 int esd_backlight = 0;
+#endif
+
 static int mdss_fb_blank_unblank(struct msm_fb_data_type *mfd)
 {
 	int ret = 0;
@@ -1518,6 +1543,7 @@ static int mdss_fb_blank_unblank(struct msm_fb_data_type *mfd)
 		mutex_lock(&mfd->bl_lock);
 		if (!mfd->allow_bl_update) {
 			mfd->allow_bl_update = true;
+#ifdef CONFIG_MACH_XIAOMI_KENZO
 			/*
 			 * If in AD calibration mode then frameworks would not
 			 * be allowed to update backlight hence post unblank
@@ -1530,7 +1556,26 @@ static int mdss_fb_blank_unblank(struct msm_fb_data_type *mfd)
 				cur_panel_dead) && esd_backlight)
 				mdss_fb_set_backlight(mfd, mfd->unset_bl_level);
 				esd_backlight = 0;
-
+#else
+			/*
+			 * 1.) If in AD calibration mode then frameworks would
+			 * not be allowed to update backlight hence post unblank
+			 * the backlight would remain 0 (0 is set in blank).
+			 * Hence resetting back to calibration mode value
+			 *
+			 * 2.) If the panel is recovering from ESD attack, then
+			 * the frameworks might not set the backlight post
+			 * unblank, hence the backlight might remain zero. Set
+			 * the backlight in such cases to the unset_bl_level
+			 * value which will be stored prior to ESD recovery
+			 * during blank.
+			 */
+			if (IS_CALIB_MODE_BL(mfd))
+				mdss_fb_set_backlight(mfd, mfd->calib_mode_bl);
+			else if (!mfd->panel_info->mipi.post_init_delay ||
+				cur_panel_dead)
+				mdss_fb_set_backlight(mfd, mfd->unset_bl_level);
+#endif
 			/*
 			 * it blocks the backlight update between unblank and
 			 * first kickoff to avoid backlight turn on before black
@@ -3060,7 +3105,7 @@ static int __mdss_fb_perform_commit(struct msm_fb_data_type *mfd)
 
 	if (dynamic_dsi_switch) {
 		pr_debug("Triggering dyn mode switch to %d\n", new_dsi_mode);
-		ret = mfd->mdp.mode_switch (mfd, new_dsi_mode);
+		ret = mfd->mdp.mode_switch(mfd, new_dsi_mode);
 		if (ret)
 			pr_err("DSI mode switch has failed");
 		else
@@ -3117,14 +3162,9 @@ static int __mdss_fb_display_thread(void *data)
 				mfd->index);
 
 	while (1) {
-		ret = wait_event_interruptible(mfd->commit_wait_q,
+		wait_event(mfd->commit_wait_q,
 				(atomic_read(&mfd->commits_pending) ||
 				 kthread_should_stop()));
-
-		if (ret) {
-			pr_info("%s: interrupted", __func__);
-			continue;
-		}
 
 		if (kthread_should_stop())
 			break;
@@ -3708,7 +3748,7 @@ static int mdss_fb_mode_switch(struct msm_fb_data_type *mfd, u32 mode)
 	if (pinfo->mipi.dms_mode == DYNAMIC_MODE_SWITCH_SUSPEND_RESUME) {
 		ret = mdss_fb_blanking_mode_switch(mfd, mode);
 	} else if (pinfo->mipi.dms_mode == DYNAMIC_MODE_SWITCH_IMMEDIATE) {
-	ret = mdss_fb_immediate_mode_switch(mfd, mode);
+		ret = mdss_fb_immediate_mode_switch(mfd, mode);
 	} else {
 		pr_warn("Panel does not support dynamic mode switch!\n");
 		ret = -EPERM;

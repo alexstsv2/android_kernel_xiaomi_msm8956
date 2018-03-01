@@ -1,4 +1,4 @@
-'ccflags-y += -I$(src)
+ccflags-y += -I$(src)
 
 obj-$(CONFIG_FB_MSM_MDSS_MHL3) += mhl3/
 
@@ -53,7 +53,8 @@ mdss-qpic-objs := mdss_qpic.o mdss_fb.o mdss_qpic_panel.o
 obj-$(CONFIG_FB_MSM_QPIC) += mdss-qpic.o
 obj-$(CONFIG_FB_MSM_QPIC_ILI_QVGA_PANEL) += qpic_panel_ili_qvga.o
 
-obj-$(CONFIG_FB_MSM_MDSS) += mdss_fb.o mdss_util.o
+obj-$(CONFIG_FB_MSM_MDSS) += mdss_fb.o mdss_util.o mdss_livedisplay.o
+obj-$(CONFIG_FB_MSM_MDSS) += lcd_notify.o
 obj-$(CONFIG_COMPAT) += mdss_compat_utils.o
 
 obj-$(CONFIG_FB_MSM_MDSS_KCAL_CTRL) += mdss_mdp_kcal_ctrl.o
